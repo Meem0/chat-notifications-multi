@@ -49,7 +49,6 @@ public class ChatNotificationsMultiPlugin extends Plugin
 	private String runeliteTitle;
 
 	//Custom Highlights
-	private Pattern usernameMatcher = null;
 	private final List<Pattern> highlightPatterns = new ArrayList<>();
 
 	@Provides
@@ -67,20 +66,7 @@ public class ChatNotificationsMultiPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		usernameMatcher = null;
 		highlightPatterns.clear();
-	}
-
-	@Subscribe
-	public void onGameStateChanged(GameStateChanged event)
-	{
-		switch (event.getGameState())
-		{
-			case LOGIN_SCREEN:
-			case HOPPING:
-				usernameMatcher = null;
-				break;
-		}
 	}
 
 	@Subscribe
@@ -138,35 +124,6 @@ public class ChatNotificationsMultiPlugin extends Plugin
 
 		switch (chatMessage.getType())
 		{
-			case TRADEREQ:
-				if (chatMessage.getMessage().contains("wishes to trade with you."))
-				{
-					notifier.notify(config.notifyOnTrade(), chatMessage.getMessage());
-				}
-				break;
-			case CHALREQ_TRADE:
-				if (chatMessage.getMessage().contains("wishes to duel with you."))
-				{
-					notifier.notify(config.notifyOnDuel(), chatMessage.getMessage());
-				}
-				break;
-			case BROADCAST:
-				// Some broadcasts have links attached, notated by `|` followed by a number, while others contain color tags.
-				// We don't want to see either in the printed notification.
-				String broadcast = chatMessage.getMessage();
-
-				int urlTokenIndex = broadcast.lastIndexOf('|');
-				if (urlTokenIndex != -1)
-				{
-					broadcast = broadcast.substring(0, urlTokenIndex);
-				}
-
-				notifier.notify(config.notifyOnBroadcast(), Text.removeFormattingTags(broadcast));
-				break;
-			case PRIVATECHAT:
-			case MODPRIVATECHAT:
-				notifier.notify(config.notifyOnPM(), Text.removeTags(chatMessage.getName()) + ": " + chatMessage.getMessage());
-				break;
 			case PRIVATECHATOUT:
 			case DIALOG:
 			case MESBOX:
@@ -191,52 +148,6 @@ public class ChatNotificationsMultiPlugin extends Plugin
 					return;
 				}
 				break;
-		}
-
-		if (usernameMatcher == null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
-		{
-			String username = client.getLocalPlayer().getName();
-			String pattern = Arrays.stream(username.split(" "))
-				.map(s -> s.isEmpty() ? "" : Pattern.quote(s))
-				.collect(Collectors.joining("[\u00a0\u0020]")); // space or nbsp
-			usernameMatcher = Pattern.compile("\\b" + pattern + "\\b", Pattern.CASE_INSENSITIVE);
-		}
-
-		if (config.highlightOwnName() && usernameMatcher != null)
-		{
-			final String message = messageNode.getValue();
-			Matcher matcher = usernameMatcher.matcher(message);
-			if (matcher.find())
-			{
-				final String username = client.getLocalPlayer().getName();
-				StringBuffer stringBuffer = new StringBuffer();
-				do
-				{
-					final int start = matcher.start(); // start not end, since username won't contain a col tag
-					final String closeColor = MoreObjects.firstNonNull(
-						getLastColor(message.substring(0, start)),
-						"<col" + ChatColorType.NORMAL + '>');
-					final String replacement = "<col" + ChatColorType.HIGHLIGHT.name() + "><u>" + username + "</u>" + closeColor;
-					matcher.appendReplacement(stringBuffer, replacement);
-				}
-				while (matcher.find());
-
-				matcher.appendTail(stringBuffer);
-
-				messageNode.setValue(stringBuffer.toString());
-				update = true;
-
-				if (chatMessage.getType() == ChatMessageType.PUBLICCHAT
-					|| chatMessage.getType() == ChatMessageType.PRIVATECHAT
-					|| chatMessage.getType() == ChatMessageType.FRIENDSCHAT
-					|| chatMessage.getType() == ChatMessageType.MODCHAT
-					|| chatMessage.getType() == ChatMessageType.MODPRIVATECHAT
-					|| chatMessage.getType() == ChatMessageType.CLAN_CHAT
-					|| chatMessage.getType() == ChatMessageType.CLAN_GUEST_CHAT)
-				{
-					sendNotification(config.notifyOnOwnName(), chatMessage);
-				}
-			}
 		}
 
 		boolean matchesHighlight = false;
