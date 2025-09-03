@@ -22,6 +22,7 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.Notifier;
 import net.runelite.client.chat.ChatColorType;
+import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.Notification;
 import net.runelite.client.eventbus.Subscribe;
@@ -48,10 +49,15 @@ public class ChatNotificationsMultiPlugin extends Plugin
 	@Named("runelite.title")
 	private String runeliteTitle;
 
-	//Custom Highlights
-	private final List<Pattern> highlightPatterns = new ArrayList<>();
+    private static class NotificationGroupInfo
+    {
+        List<Pattern> highlightPatterns;
+        Notification notification;
+    }
 
-	@Provides
+    private final List<NotificationGroupInfo> notificationGroupInfos = new ArrayList<>();
+
+    @Provides
 	ChatNotificationsMultiConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(ChatNotificationsMultiConfig.class);
@@ -66,7 +72,7 @@ public class ChatNotificationsMultiPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		highlightPatterns.clear();
+        notificationGroupInfos.clear();
 	}
 
 	@Subscribe
@@ -78,30 +84,58 @@ public class ChatNotificationsMultiPlugin extends Plugin
 		}
 	}
 
+    private NotificationGroupInfo createNotificationGroupInfo(int groupIndex)
+    {
+        Notification[] configNotifications = {config.notificationGroup1(), config.notificationGroup2(), config.notificationGroup3()};
+        String[] configWordsStrings = {config.wordsStringGroup1(), config.wordsStringGroup2(), config.wordsStringGroup3()};
+        String[] configRegexStrings = {config.regexStringGroup1(), config.regexStringGroup2(), config.regexStringGroup3()};
+
+        Notification notification = groupIndex < configNotifications.length ? configNotifications[groupIndex] : null;
+        String wordsString = groupIndex < configWordsStrings.length ? configWordsStrings[groupIndex] : "";
+        String regexString = groupIndex < configRegexStrings.length ? configRegexStrings[groupIndex] : "";
+
+        if (notification == null)
+        {
+            return null;
+        }
+
+        NotificationGroupInfo notificationGroupInfo = new NotificationGroupInfo();
+        notificationGroupInfo.notification = notification;
+        notificationGroupInfo.highlightPatterns = new ArrayList<>();
+
+        if (!wordsString.trim().isEmpty())
+        {
+            List<String> items = Text.fromCSV(wordsString);
+            String joined = items.stream()
+                .map(Text::escapeJagex) // we compare these strings to the raw Jagex ones
+                .map(this::quoteAndIgnoreColor) // regex escape and ignore nested colors in the target message
+                .collect(Collectors.joining("|"));
+            // To match <word> \b doesn't work due to <> not being in \w,
+            // so match \b or \s, as well as \A and \z for beginning and end of input respectively
+            notificationGroupInfo.highlightPatterns.add(Pattern.compile("(?:\\b|(?<=\\s)|\\A)(?:" + joined + ")(?:\\b|(?=\\s)|\\z)", Pattern.CASE_INSENSITIVE));
+        }
+
+        Splitter
+            .on("\n")
+            .omitEmptyStrings()
+            .trimResults()
+            .splitToList(regexString).stream()
+            .map(ChatNotificationsMultiPlugin::compilePattern)
+            .filter(Objects::nonNull)
+            .forEach(notificationGroupInfo.highlightPatterns::add);
+
+        return notificationGroupInfo;
+    }
+
 	private void updateHighlights()
 	{
-		highlightPatterns.clear();
+        notificationGroupInfos.clear();
 
-		if (!config.highlightWordsString().trim().equals(""))
-		{
-			List<String> items = Text.fromCSV(config.highlightWordsString());
-			String joined = items.stream()
-				.map(Text::escapeJagex) // we compare these strings to the raw Jagex ones
-				.map(this::quoteAndIgnoreColor) // regex escape and ignore nested colors in the target message
-				.collect(Collectors.joining("|"));
-			// To match <word> \b doesn't work due to <> not being in \w,
-			// so match \b or \s, as well as \A and \z for beginning and end of input respectively
-			highlightPatterns.add(Pattern.compile("(?:\\b|(?<=\\s)|\\A)(?:" + joined + ")(?:\\b|(?=\\s)|\\z)", Pattern.CASE_INSENSITIVE));
-		}
-
-		Splitter
-			.on("\n")
-			.omitEmptyStrings()
-			.trimResults()
-			.splitToList(config.highlightRegexString()).stream()
-			.map(ChatNotificationsMultiPlugin::compilePattern)
-			.filter(Objects::nonNull)
-			.forEach(highlightPatterns::add);
+        for (int i = 0; i < 3; ++i)
+        {
+            NotificationGroupInfo groupInfo = createNotificationGroupInfo(i);
+            notificationGroupInfos.add(groupInfo);
+        }
 	}
 
 	private static Pattern compilePattern(String pattern)
@@ -120,7 +154,6 @@ public class ChatNotificationsMultiPlugin extends Plugin
 	public void onChatMessage(ChatMessage chatMessage)
 	{
 		MessageNode messageNode = chatMessage.getMessageNode();
-		boolean update = false;
 
 		switch (chatMessage.getType())
 		{
@@ -150,54 +183,57 @@ public class ChatNotificationsMultiPlugin extends Plugin
 				break;
 		}
 
-		boolean matchesHighlight = false;
-		// Get nodeValue to store and update in between the different pattern passes
-		// The messageNode value is only set after all patterns have been processed
-		String nodeValue = messageNode.getValue();
+        for (NotificationGroupInfo notificationGroupInfo : notificationGroupInfos)
+        {
+            if (!notificationGroupInfo.notification.isEnabled())
+            {
+                continue;
+            }
 
-		for (Pattern pattern : highlightPatterns)
-		{
-			Matcher matcher = pattern.matcher(nodeValue);
-			if (!matcher.find())
-			{
-				continue;
-			}
+            boolean matchesHighlight = false;
+            // Get nodeValue to store and update in between the different pattern passes
+            // The messageNode value is only set after all patterns have been processed
+            String nodeValue = messageNode.getValue();
 
-			StringBuffer stringBuffer = new StringBuffer();
+            for (Pattern pattern : notificationGroupInfo.highlightPatterns)
+            {
+                Matcher matcher = pattern.matcher(nodeValue);
+                if (!matcher.find())
+                {
+                    continue;
+                }
 
-			do
-			{
-				final int end = matcher.end();
-				// Determine the ending color by finding the last color tag up to and
-				// including the match.
-				final String closeColor = MoreObjects.firstNonNull(
-					getLastColor(nodeValue.substring(0, end)),
-					"<col" + ChatColorType.NORMAL + '>');
-				// Strip color tags from the highlighted region so that it remains highlighted correctly
-				final String value = stripColor(matcher.group());
+                StringBuffer stringBuffer = new StringBuffer();
 
-				matcher.appendReplacement(stringBuffer, "<col" + ChatColorType.HIGHLIGHT + '>' + value + closeColor);
+                do
+                {
+                    final int end = matcher.end();
+                    // Determine the ending color by finding the last color tag up to and
+                    // including the match.
+                    final String closeColor = MoreObjects.firstNonNull(
+                        getLastColor(nodeValue.substring(0, end)),
+                        "<col" + ChatColorType.NORMAL + '>');
+                    // Strip color tags from the highlighted region so that it remains highlighted correctly
+                    final String value = stripColor(matcher.group());
 
-				update = true;
-				matchesHighlight = true;
-			}
-			while (matcher.find());
+                    matcher.appendReplacement(stringBuffer, "<col" + ChatColorType.HIGHLIGHT + '>' + value + closeColor);
 
-			// Append stringBuffer with remainder of message and update nodeValue
-			matcher.appendTail(stringBuffer);
-			nodeValue = stringBuffer.toString();
-		}
+                    matchesHighlight = true;
+                }
+                while (matcher.find());
 
-		if (matchesHighlight)
-		{
-			messageNode.setValue(nodeValue);
-			sendNotification(config.notifyOnHighlight(), chatMessage);
-		}
+                // Append stringBuffer with remainder of message and update nodeValue
+                matcher.appendTail(stringBuffer);
+                nodeValue = stringBuffer.toString();
+            }
 
-		if (update)
-		{
-			messageNode.setRuneLiteFormatMessage(messageNode.getValue());
-		}
+            if (matchesHighlight)
+            {
+                sendNotification(notificationGroupInfo.notification, chatMessage);
+                messageNode.setValue(nodeValue);
+                messageNode.setRuneLiteFormatMessage(messageNode.getValue());
+            }
+        }
 	}
 
 	private void sendNotification(Notification notification, ChatMessage message)
